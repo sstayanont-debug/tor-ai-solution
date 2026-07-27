@@ -1,0 +1,6 @@
+# ห้ามแชร์/commit ไฟล์เหล่านี้ — มีความลับ (API key, รหัสผ่าน, token เข้าอีเมล)
+.env
+credentials.json
+data/
+__pycache__/
+*.pyc
