@@ -1,5 +1,6 @@
 """หน้า Inbox TOR Watcher — สแกนอีเมลบริษัทหา TOR/RFP อัตโนมัติ แล้วนำเข้าเป็นโครงการด้วย AI"""
 
+import os
 import streamlit as st
 import db
 import ai_engine
@@ -25,27 +26,36 @@ if not email_watcher.is_configured():
 
 st.divider()
 
-# ---------------- การเชื่อมต่อ Gmail ----------------
+# ------------------- การเชื่อมต่อ Gmail (Web OAuth — ใช้ได้ทั้งบนเครื่องและบนคลาวด์) -------------------
+REDIRECT_URI = os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8501")
+
+qp = st.query_params
+if "code" in qp and not email_watcher.is_connected():
+    try:
+        email_watcher.exchange_code_for_token(qp["code"], qp.get("state", ""), REDIRECT_URI)
+        st.query_params.clear()
+        st.success("เชื่อมต่อ Gmail สำเร็จ")
+        st.rerun()
+    except Exception as e:
+        st.error(f"เชื่อมต่อไม่สำเร็จ: {e}")
+
 col1, col2 = st.columns([3, 1])
 with col1:
     if email_watcher.is_connected():
-        st.success("✅ เชื่อมต่อ Gmail แล้ว")
+        st.success("เชื่อมต่อ Gmail แล้ว")
     else:
-        st.info("ยังไม่ได้เชื่อมต่อ Gmail — กดปุ่มเชื่อมต่อเพื่อ authorize (จะเปิดหน้าต่างเบราว์เซอร์ให้ล็อกอิน)")
+        st.info("ยังไม่ได้เชื่อมต่อ Gmail — กดปุ่มเชื่อมต่อ จะเปิดแท็บใหม่ให้ล็อกอิน Gmail แล้วกลับมาหน้านี้อัตโนมัติ")
 with col2:
     if email_watcher.is_connected():
-        if st.button("🔌 ยกเลิกการเชื่อมต่อ"):
+        if st.button("ยกเลิกการเชื่อมต่อ"):
             email_watcher.disconnect()
             st.rerun()
     else:
-        if st.button("🔗 เชื่อมต่อ Gmail", type="primary"):
-            with st.spinner("กำลังเปิดหน้าต่างล็อกอิน Gmail... (ดูที่เบราว์เซอร์)"):
-                try:
-                    email_watcher.get_gmail_service()
-                    st.success("เชื่อมต่อสำเร็จ")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"เชื่อมต่อไม่สำเร็จ: {e}")
+        try:
+            auth_url, _state = email_watcher.get_authorization_url(REDIRECT_URI)
+            st.link_button("เชื่อมต่อ Gmail", auth_url, type="primary")
+        except Exception as e:
+            st.error(f"ตั้งค่าไม่ครบ: {e}")
 
 if not email_watcher.is_connected():
     st.stop()

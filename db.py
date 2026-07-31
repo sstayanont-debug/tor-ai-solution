@@ -260,6 +260,7 @@ def init_db():
         # ---------------- Migration: add ownership columns to existing tables ----------------
         _ensure_column(conn, "projects", "department_id", "INTEGER")
         _ensure_column(conn, "projects", "created_by_user_id", "INTEGER")
+        _ensure_column(conn, "company_profile", "gmail_token_json", "TEXT")
 
 
 def _ensure_column(conn, table: str, column: str, coltype: str):
@@ -821,3 +822,26 @@ def update_email_lead_status(lead_id: int, status: str, linked_project_id: int =
             )
         else:
             conn.execute("UPDATE email_leads SET status = ? WHERE id = ?", (status, lead_id))
+
+
+# -------------------- Gmail OAuth token (Inbox TOR Watcher) --------------------
+
+def get_gmail_token() -> str:
+    """ดึง Gmail OAuth token (JSON string) ที่เก็บไว้ในฐานข้อมูล — ใช้แทนไฟล์ เพราะไฟล์บนคลาวด์ไม่ persist"""
+    with get_conn() as conn:
+        row = conn.execute("SELECT gmail_token_json FROM company_profile WHERE id = 1").fetchone()
+        return row["gmail_token_json"] if row and row["gmail_token_json"] else None
+
+
+def set_gmail_token(token_json: str):
+    with get_conn() as conn:
+        existing = conn.execute("SELECT id FROM company_profile WHERE id = 1").fetchone()
+        if existing:
+            conn.execute("UPDATE company_profile SET gmail_token_json=? WHERE id=1", (token_json,))
+        else:
+            conn.execute("INSERT INTO company_profile (id, gmail_token_json) VALUES (1, ?)", (token_json,))
+
+
+def clear_gmail_token():
+    with get_conn() as conn:
+        conn.execute("UPDATE company_profile SET gmail_token_json=NULL WHERE id=1")

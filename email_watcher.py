@@ -25,45 +25,93 @@ DEFAULT_KEYWORDS = [
 
 
 def is_configured() -> bool:
-    """มีไฟล์ credentials.json (OAuth client) วางไว้แล้วหรือยัง"""
+    """มี OAuth client ตั้งค่าไว้แล้วหรือยัง (จาก environment variable แบบ Web OAuth หรือไฟล์ credentials.json แบบเก่า)"""
+    if os.environ.get("GOOGLE_OAUTH_CLIENT_ID") and os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET"):
+        return True
     return os.path.exists(CREDENTIALS_PATH)
 
 
 def is_connected() -> bool:
-    """เคย authorize บัญชี Gmail แล้วหรือยัง (มี token เก็บไว้)"""
-    return os.path.exists(TOKEN_PATH)
+    """เคย authorize บัญชี Gmail แล้วหรือยัง (เช็คจาก token ที่เก็บในฐานข้อมูล)"""
+    import db
+    return bool(db.get_gmail_token())
 
 
 def disconnect():
-    if os.path.exists(TOKEN_PATH):
-        os.remove(TOKEN_PATH)
+    import db
+    db.clear_gmail_token()
 
+
+def _get_client_config():
+    """อ่านค่า OAuth client (id/secret) แบบ Web application จาก environment variable
+    (ตั้งค่าใน .env ตอนรันบนเครื่อง หรือ Secrets ตอน deploy บนคลาวด์) — ใช้แทน credentials.json แบบ Desktop app เดิม"""
+    client_id = os.environ.get("GOOGLE_OAUTH_CLIENT_ID")
+    client_secret = os.environ.get("GOOGLE_OAUTH_CLIENT_SECRET")
+    if client_id and client_secret:
+        return {
+            "web": {
+                "client_id": client_id,
+                "client_secret": client_secret,
+                "auth_uri": "https://accounts.google.com/o/oauth2/auth",
+                "token_uri": "https://oauth2.googleapis.com/token",
+            }
+        }
+    return None
+
+
+def get_authorization_url(redirect_uri: str):
+    """สร้างลิงก์ให้ผู้ใช้กดไปอนุญาต Gmail — เปิดแท็บใหม่ แล้ว Google จะ redirect กลับมาที่ redirect_uri พร้อม ?code=...&state=...
+    หมายเหตุ: สุ่ม code_verifier (PKCE) เองแล้วฝากไปกับพารามิเตอร์ state เพราะ Google จะสะท้อนค่า state
+    กลับมาให้เป๊ะๆ ตอน redirect กลับ — ใช้แทนการเก็บ state ไว้ในเครื่อง (ซึ่งอาจหายไปเพราะเปิดคนละ request/instance)"""
+    import secrets
+    from google_auth_oauthlib.flow import Flow
+
+    client_config = _get_client_config()
+    if not client_config:
+        raise RuntimeError(
+            "ไม่พบ GOOGLE_OAUTH_CLIENT_ID / GOOGLE_OAUTH_CLIENT_SECRET "
+            "กรุณาตั้งค่าใน .env (รันบนเครื่อง) หรือ Secrets (รันบนคลาวด์) ก่อน"
+        )
+    code_verifier = secrets.token_urlsafe(64)
+    flow = Flow.from_client_config(
+        client_config, scopes=SCOPES, redirect_uri=redirect_uri, code_verifier=code_verifier
+    )
+    auth_url, _state = flow.authorization_url(
+        access_type="offline", include_granted_scopes="true", prompt="consent", state=code_verifier
+    )
+    return auth_url, code_verifier
+
+
+def exchange_code_for_token(code: str, state: str, redirect_uri: str):
+    """แลก authorization code ที่ได้จากการ redirect กลับมา เป็น token แล้วบันทึกลงฐานข้อมูล
+    ต้องส่ง state ที่ Google ส่งกลับมาด้วย (ใช้เป็น code_verifier ตัวเดิมที่สุ่มไว้ตอน get_authorization_url)"""
+    import db
+    from google_auth_oauthlib.flow import Flow
+
+    client_config = _get_client_config()
+    flow = Flow.from_client_config(client_config, scopes=SCOPES, redirect_uri=redirect_uri, code_verifier=state)
+    flow.fetch_token(code=code)
+    db.set_gmail_token(flow.credentials.to_json())
 
 def get_gmail_service():
-    """สร้าง Gmail API client — ถ้ายังไม่เคย authorize จะเปิดเบราว์เซอร์ให้ล็อกอิน (ใช้ได้เมื่อรันแอปบนเครื่อง/เซิร์ฟเวอร์ที่มีเบราว์เซอร์เข้าถึงได้)"""
+    """สร้าง Gmail API client จาก token ที่เชื่อมต่อไว้แล้ว (ต้องเชื่อมต่อผ่านหน้าเว็บก่อน — ดู get_authorization_url)"""
+    import json
+    import db
     from google.auth.transport.requests import Request
     from google.oauth2.credentials import Credentials
-    from google_auth_oauthlib.flow import InstalledAppFlow
     from googleapiclient.discovery import build
 
-    if not is_configured():
-        raise RuntimeError(
-            "ไม่พบไฟล์ credentials.json — กรุณาตั้งค่า Google Cloud OAuth ก่อน (ดูขั้นตอนใน README.md)"
-        )
+    token_json = db.get_gmail_token()
+    if not token_json:
+        raise RuntimeError("ยังไม่ได้เชื่อมต่อ Gmail — กรุณากดปุ่ม 'เชื่อมต่อ Gmail' ก่อน")
 
-    os.makedirs(os.path.dirname(TOKEN_PATH), exist_ok=True)
-    creds = None
-    if os.path.exists(TOKEN_PATH):
-        creds = Credentials.from_authorized_user_file(TOKEN_PATH, SCOPES)
-
-    if not creds or not creds.valid:
-        if creds and creds.expired and creds.refresh_token:
+    creds = Credentials.from_authorized_user_info(json.loads(token_json), SCOPES)
+    if not creds.valid:
+        if creds.expired and creds.refresh_token:
             creds.refresh(Request())
+            db.set_gmail_token(creds.to_json())
         else:
-            flow = InstalledAppFlow.from_client_secrets_file(CREDENTIALS_PATH, SCOPES)
-            creds = flow.run_local_server(port=0)
-        with open(TOKEN_PATH, "w") as f:
-            f.write(creds.to_json())
+            raise RuntimeError("การเชื่อมต่อ Gmail หมดอายุ กรุณากดปุ่ม 'เชื่อมต่อ Gmail' ใหม่อีกครั้ง")
 
     return build("gmail", "v1", credentials=creds)
 

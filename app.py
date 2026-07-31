@@ -8,6 +8,23 @@ import db
 import auth
 
 st.set_page_config(page_title="TOR AI Solution", page_icon="📊", layout="wide")
+import os
+import email_watcher
+
+# ---- ประมวลผล Gmail OAuth callback ก่อนเช็ค login ----
+# Google จะ redirect กลับมาที่ URL หน้าแรกเสมอ (ตาม redirect_uri ที่ตั้งไว้ตอนสร้าง OAuth client)
+# โค้ดส่วนนี้ต้องอยู่ก่อน require_login() และทำงานทุกครั้งที่แอปโหลด ไม่ว่าจะอยู่หน้าไหน
+_qp = st.query_params
+if "code" in _qp:
+    _redirect_uri = os.environ.get("OAUTH_REDIRECT_URI", "http://localhost:8501")
+    try:
+        email_watcher.exchange_code_for_token(_qp["code"], _qp.get("state", ""), _redirect_uri)
+        st.query_params.clear()
+        st.success("เชื่อมต่อ Gmail สำเร็จ — ไปที่เมนู 'TOR จากอีเมล' ได้เลย")
+    except Exception as e:
+        st.query_params.clear()
+        st.error(f"เชื่อมต่อ Gmail ไม่สำเร็จ: {e}")
+
 user = auth.require_login()
 
 PAGE_ROLES = {
