@@ -1,29 +1,101 @@
 """
-db.py — SQLite persistence layer for TOR AI Solution
+db.py — Postgres (Supabase) persistence layer for TOR AI Solution
 เก็บข้อมูลโปรไฟล์บริษัท, โครงการที่วิเคราะห์, และ milestone ของสัญญา
+
+หมายเหตุ: ย้ายจาก SQLite มาเป็น Postgres เพื่อให้ข้อมูลไม่หายเวลาแอปบน Streamlit Cloud
+reboot/sleep (ไฟล์ SQLite เดิมอยู่บน filesystem ชั่วคราว หายทุกครั้งที่ container รีสตาร์ท)
+
+ฟังก์ชันทั้งหมดด้านล่างมีชื่อ/พารามิเตอร์เหมือนเดิมทุกตัว — ไฟล์อื่น (app.py, pages/*.py,
+email_watcher.py) ไม่ต้องแก้อะไรเลย เพราะ get_conn() คืนค่า wrapper ที่ทำตัวเหมือน sqlite3
+connection (มี .execute() ที่คืน cursor ซึ่งมี .fetchone()/.fetchall()/.lastrowid)
 """
 
-import sqlite3
 import json
 import os
 from datetime import datetime
 from contextlib import contextmanager
 
-DB_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "tor_ai.db")
+import psycopg2
+import psycopg2.extras
 
 
-def _ensure_data_dir():
-    os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
+class _CursorResult:
+    """ห่อ psycopg2 cursor ให้มีหน้าตาเหมือนค่าที่ sqlite3's conn.execute() คืนกลับมา
+    (รวมถึง .lastrowid ซึ่ง Postgres ไม่มีในตัว ต้องจำลองด้วย RETURNING id)"""
+
+    def __init__(self, cursor, lastrowid=None):
+        self._cursor = cursor
+        self.lastrowid = lastrowid
+
+    def fetchone(self):
+        return self._cursor.fetchone()
+
+    def fetchall(self):
+        return self._cursor.fetchall()
+
+
+class _ConnWrapper:
+    """ห่อ psycopg2 connection ให้เรียกใช้แบบเดิมที่โค้ดทั้งไฟล์คุ้นเคย (conn.execute(...))
+    - แปลง placeholder '?' (สไตล์ SQLite) เป็น '%s' (สไตล์ Postgres) ให้อัตโนมัติ
+    - เติม RETURNING id ให้ทุกคำสั่ง INSERT โดยอัตโนมัติ (ถ้ายังไม่มี) เพื่อจำลอง cur.lastrowid
+    """
+
+    def __init__(self, conn):
+        self._conn = conn
+
+    def execute(self, sql, params=()):
+        pg_sql = sql.replace("?", "%s")
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+        needs_returning = (
+            pg_sql.strip().upper().startswith("INSERT")
+            and "RETURNING" not in pg_sql.upper()
+        )
+        if needs_returning:
+            pg_sql = pg_sql.rstrip().rstrip(";") + " RETURNING id"
+
+        cur.execute(pg_sql, params)
+
+        lastrowid = None
+        if needs_returning:
+            try:
+                row = cur.fetchone()
+                lastrowid = row["id"] if row else None
+            except psycopg2.ProgrammingError:
+                lastrowid = None
+
+        return _CursorResult(cur, lastrowid)
+
+    def cursor(self):
+        return self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    def commit(self):
+        self._conn.commit()
+
+    def rollback(self):
+        self._conn.rollback()
+
+    def close(self):
+        self._conn.close()
 
 
 @contextmanager
 def get_conn():
-    _ensure_data_dir()
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
+    # อ่านค่าตอนเรียกใช้จริง (ไม่ใช่ตอน import โมดูล) เพราะบางครั้ง load_dotenv()
+    # ในไฟล์อื่นอาจถูกเรียกทีหลังกว่าตอนที่ db.py ถูก import ครั้งแรก
+    database_url = os.environ.get("DATABASE_URL")
+    if not database_url:
+        raise RuntimeError(
+            "ไม่พบ DATABASE_URL กรุณาตั้งค่าใน .env (รันบนเครื่อง) หรือ Secrets (รันบนคลาวด์) ก่อน"
+        )
+    raw_conn = psycopg2.connect(database_url)
+    conn = _ConnWrapper(raw_conn)
     try:
         yield conn
         conn.commit()
+    except Exception:
+        conn.rollback()
+        raise
     finally:
         conn.close()
 
@@ -46,7 +118,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS projects (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 name TEXT NOT NULL,
                 tor_text TEXT,
                 tor_analysis TEXT,
@@ -60,7 +132,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS milestones (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 title TEXT,
                 due_date TEXT,
@@ -76,7 +148,7 @@ def init_db():
         # ---------------- Sales & Pipeline ----------------
         c.execute("""
             CREATE TABLE IF NOT EXISTS boms (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 solution_architecture_summary TEXT,
                 total_cost_estimate REAL,
@@ -91,7 +163,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS bom_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 bom_id INTEGER NOT NULL,
                 category TEXT,
                 item_name TEXT,
@@ -106,7 +178,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS competitors (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 competitor_name TEXT,
                 past_win_rate TEXT,
@@ -123,7 +195,7 @@ def init_db():
         # ---------------- Procurement ----------------
         c.execute("""
             CREATE TABLE IF NOT EXISTS vendors (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 vendor_name TEXT,
                 category TEXT,
                 contact_info TEXT,
@@ -134,7 +206,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS rfqs (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 bom_id INTEGER,
                 title TEXT,
@@ -147,7 +219,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS rfq_items (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 rfq_id INTEGER NOT NULL,
                 item_name TEXT,
                 spec TEXT,
@@ -158,7 +230,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS vendor_quotes (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 rfq_id INTEGER NOT NULL,
                 vendor_id INTEGER,
                 vendor_name_freeform TEXT,
@@ -179,7 +251,7 @@ def init_db():
         # ---------------- Contract Lifecycle ----------------
         c.execute("""
             CREATE TABLE IF NOT EXISTS contracts (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 project_id INTEGER NOT NULL,
                 contract_text TEXT,
                 version INTEGER DEFAULT 1,
@@ -191,7 +263,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS obligations (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 contract_id INTEGER NOT NULL,
                 obligation_text TEXT,
                 category TEXT,
@@ -209,14 +281,14 @@ def init_db():
         # ---------------- Auth / Users / Departments / Audit ----------------
         c.execute("""
             CREATE TABLE IF NOT EXISTS departments (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 name TEXT UNIQUE NOT NULL,
                 created_at TEXT
             )
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS users (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 email TEXT UNIQUE NOT NULL,
                 name TEXT,
                 password_hash TEXT NOT NULL,
@@ -230,7 +302,7 @@ def init_db():
         """)
         c.execute("""
             CREATE TABLE IF NOT EXISTS audit_log (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 user_id INTEGER,
                 user_email TEXT,
                 action TEXT,
@@ -244,7 +316,7 @@ def init_db():
         # ---------------- Inbox TOR Watcher ----------------
         c.execute("""
             CREATE TABLE IF NOT EXISTS email_leads (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                id SERIAL PRIMARY KEY,
                 gmail_message_id TEXT UNIQUE,
                 sender TEXT,
                 subject TEXT,
@@ -264,7 +336,12 @@ def init_db():
 
 
 def _ensure_column(conn, table: str, column: str, coltype: str):
-    cols = [r[1] for r in conn.execute(f"PRAGMA table_info({table})").fetchall()]
+    cur = conn.cursor()
+    cur.execute(
+        "SELECT column_name FROM information_schema.columns WHERE table_name = %s",
+        (table,),
+    )
+    cols = [r["column_name"] for r in cur.fetchall()]
     if column not in cols:
         conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {coltype}")
 
@@ -691,7 +768,7 @@ def update_obligation_status(obligation_id: int, status: str):
 def create_department(name: str) -> int:
     with get_conn() as conn:
         cur = conn.execute(
-            "INSERT OR IGNORE INTO departments (name, created_at) VALUES (?, ?)",
+            "INSERT INTO departments (name, created_at) VALUES (?, ?) ON CONFLICT (name) DO NOTHING",
             (name, datetime.now().isoformat())
         )
         row = conn.execute("SELECT id FROM departments WHERE name = ?", (name,)).fetchone()
@@ -794,9 +871,10 @@ def upsert_email_lead(gmail_message_id: str, sender: str, subject: str, received
     with get_conn() as conn:
         now = datetime.now().isoformat()
         conn.execute("""
-            INSERT OR IGNORE INTO email_leads
+            INSERT INTO email_leads
                 (gmail_message_id, sender, subject, received_at, attachment_names, status, scanned_at)
             VALUES (?, ?, ?, ?, ?, 'new', ?)
+            ON CONFLICT (gmail_message_id) DO NOTHING
         """, (gmail_message_id, sender, subject, received_at, ", ".join(attachment_names), now))
         row = conn.execute("SELECT id FROM email_leads WHERE gmail_message_id = ?", (gmail_message_id,)).fetchone()
         return row["id"] if row else None
