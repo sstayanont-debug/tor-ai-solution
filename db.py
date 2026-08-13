@@ -448,6 +448,8 @@ def add_milestones(project_id: int, milestones: list):
     with get_conn() as conn:
         now = datetime.now().isoformat()
         for m in milestones:
+            if not isinstance(m, dict):
+                continue
             conn.execute("""
                 INSERT INTO milestones (project_id, title, due_date, deliverable, payment_percent, status, notes, created_at)
                 VALUES (?, ?, ?, ?, ?, 'pending', ?, ?)

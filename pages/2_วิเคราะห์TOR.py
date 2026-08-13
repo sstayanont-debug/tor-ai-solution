@@ -19,7 +19,11 @@ def extract_text_from_file(uploaded_file) -> str:
     if name.endswith(".pdf"):
         from pypdf import PdfReader
         reader = PdfReader(io.BytesIO(data))
-        return "\n".join((page.extract_text() or "") for page in reader.pages)
+        text = "\n".join((page.extract_text() or "") for page in reader.pages)
+        if not text.strip():
+            with st.spinner("ไฟล์นี้เป็น PDF สแกน กำลังใช้ AI อ่านข้อความ (อาจใช้เวลาสักครู่ ถ้าไฟล์มีหลายหน้า)..."):
+                text = ai_engine.extract_text_from_pdf_via_ai(data)
+        return text
     elif name.endswith(".docx"):
         import docx
         document = docx.Document(io.BytesIO(data))

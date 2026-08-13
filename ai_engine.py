@@ -43,6 +43,7 @@ def _call_tool(system_prompt: str, user_prompt: str, tool_name: str, tool_descri
     for block in resp.content:
         if block.type == "tool_use" and block.name == tool_name:
             return block.input
+    raise RuntimeError(f"AI ไม่ได้ส่งผลลัพธ์กลับมาในรูปแบบที่กำหนด (tool: {tool_name}) กรุณาลองใหม่อีกครั้ง")
     raise RuntimeError("Claude ไม่ได้ตอบกลับด้วย tool_use ตามที่คาดไว้")
 
 
@@ -462,3 +463,55 @@ def extract_milestones(tor_analysis: dict, tor_text: str) -> dict:
         tool_description="บันทึกรายการ milestone ของสัญญาแบบมีโครงสร้าง",
         input_schema=MILESTONES_SCHEMA,
     )
+
+
+def extract_text_from_pdf_via_ai(pdf_bytes: bytes, max_pages_per_batch: int = 90) -> str:
+    """อ่านข้อความจาก PDF ด้วย Claude โดยตรง (รองรับ PDF ที่สแกนมา/เป็นรูปภาพ ซึ่ง pypdf อ่านไม่ได้)
+    ถ้าเอกสารมีหลายหน้าเกินขีดจำกัดต่อการเรียก จะแบ่งเป็นชุดๆ แล้วต่อข้อความกลับเป็นชิ้นเดียว"""
+    import io
+    import base64
+    from pypdf import PdfReader, PdfWriter
+
+    reader = PdfReader(io.BytesIO(pdf_bytes))
+    total_pages = len(reader.pages)
+    client = get_client()
+
+    all_text = []
+    for start in range(0, total_pages, max_pages_per_batch):
+        end = min(start + max_pages_per_batch, total_pages)
+        writer = PdfWriter()
+        for i in range(start, end):
+            writer.add_page(reader.pages[i])
+        buf = io.BytesIO()
+        writer.write(buf)
+        b64_data = base64.standard_b64encode(buf.getvalue()).decode("utf-8")
+
+        resp = client.messages.create(
+            model=DEFAULT_MODEL,
+            max_tokens=8000,
+            messages=[{
+                "role": "user",
+                "content": [
+                    {
+                        "type": "document",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "application/pdf",
+                            "data": b64_data,
+                        },
+                    },
+                    {
+                        "type": "text",
+                        "text": (
+                            "กรุณาถอดข้อความทั้งหมดในเอกสาร PDF นี้ออกมาเป็นข้อความล้วน "
+                            "ให้ครบทุกหน้าตามลำดับ ไม่ต้องสรุปหรือย่อ ไม่ต้องแสดงความเห็นเพิ่มเติม "
+                            "ถ้าหน้าไหนมีตาราง ให้พยายามคงโครงสร้างข้อมูลไว้ในรูปแบบข้อความให้มากที่สุด"
+                        ),
+                    },
+                ],
+            }],
+        )
+        chunk_text = "".join(block.text for block in resp.content if block.type == "text")
+        all_text.append(chunk_text)
+
+    return "\n\n".join(all_text)
