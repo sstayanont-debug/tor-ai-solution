@@ -26,7 +26,14 @@ def extract_text_from_file(uploaded_file) -> str:
         return text
     elif name.endswith(".docx"):
         import docx
-        document = docx.Document(io.BytesIO(data))
+        try:
+            document = docx.Document(io.BytesIO(data))
+        except Exception:
+            raise ValueError(
+                "ไฟล์นี้ไม่ใช่ไฟล์ .docx ที่ถูกต้อง (อาจเป็นไฟล์ .doc รุ่นเก่าที่เปลี่ยนแค่นามสกุล "
+                "หรือไฟล์เสียหายระหว่างดาวน์โหลด) ลองเปิดไฟล์ด้วย Word หรือ Google Docs "
+                "แล้ว Save As / Download เป็น .docx ใหม่อีกครั้ง แล้วอัปโหลดไฟล์ใหม่"
+            )
         return "\n".join(p.text for p in document.paragraphs)
     else:
         return data.decode("utf-8", errors="ignore")
