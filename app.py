@@ -36,7 +36,7 @@ PAGE_ROLES = {
     "pages/6_ตรวจสัญญา.py": ["admin", "legal"],
     "pages/7_จัดการผู้ใช้.py": ["admin"],
     "pages/8_TOR_จากอีเมล.py": ["admin", "sales"],
-    "pages/9_e-GP_Market_Intelligence.py": ["admin", "sales"],
+#     "pages/9_e-GP_Market_Intelligence.py": ["admin", "sales"],
 }
 
 PAGE_META = {
@@ -48,7 +48,7 @@ PAGE_META = {
     "pages/6_ตรวจสัญญา.py": ("ตรวจสัญญา", "⚖️"),
     "pages/7_จัดการผู้ใช้.py": ("จัดการผู้ใช้", "👥"),
     "pages/8_TOR_จากอีเมล.py": ("TOR จากอีเมล", "📬"),
-    "pages/9_e-GP_Market_Intelligence.py": ("e-GP Market Intelligence", "🏛️"),
+#     "pages/9_e-GP_Market_Intelligence.py": ("e-GP Market Intelligence", "🏛️"),
 }
 
 
